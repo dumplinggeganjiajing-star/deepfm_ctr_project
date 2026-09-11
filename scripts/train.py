@@ -2,22 +2,63 @@
 # -*- coding: utf-8 -*-
 """训练脚本（生产部署用）"""
 import argparse
+import json
+import math
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from deepfm_ctr.config import DATA_CONFIG, MODEL_CONFIG, TRAINING_CONFIG
-from deepfm_ctr.DataProcess import DataProcessor, GROUP_COL
+from deepfm_ctr.DataProcess import DATE_COL, DataProcessor, GROUP_COL
 from deepfm_ctr.model import DeepFMBuilder
 from deepfm_ctr.trainer import ModelTrainer
 
 
+def _json_metric(value):
+    """把 NumPy/float 指标转换为严格 JSON 值。"""
+    if isinstance(value, (int,)) and not isinstance(value, bool):
+        return int(value)
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _date_range(df):
+    if df is None or df.empty or DATE_COL not in df.columns:
+        return None
+    return {
+        'min': df[DATE_COL].min().strftime('%Y%m%d'),
+        'max': df[DATE_COL].max().strftime('%Y%m%d'),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--mode',
+        choices=('tune', 'final'),
+        default='tune',
+        help='tune=独立日期验证并早停；final=完整训练窗口固定轮数训练',
+    )
     parser.add_argument('--data_dir', default=DATA_CONFIG['data_dir'])
     parser.add_argument('--start_date', default=DATA_CONFIG['start_date'])
     parser.add_argument('--split_date', default=DATA_CONFIG['split_date'])
     parser.add_argument('--end_date', default=DATA_CONFIG['end_date'])
+    parser.add_argument(
+        '--split_strategy',
+        choices=('date', 'ratio'),
+        default=DATA_CONFIG.get('split_strategy', 'date'),
+        help='date=按明确日期边界；ratio=窗口内按时间排序后按样本比例切分',
+    )
+    parser.add_argument(
+        '--train_ratio',
+        type=float,
+        default=DATA_CONFIG.get('train_ratio', 0.8),
+    )
+    parser.add_argument(
+        '--validation_ratio',
+        type=float,
+        default=DATA_CONFIG.get('validation_ratio', 0.1),
+    )
     parser.add_argument('--batch_size', type=int, default=TRAINING_CONFIG['batch_size'])
     parser.add_argument('--epochs', type=int, default=TRAINING_CONFIG['epochs'])
     parser.add_argument(
@@ -36,6 +77,15 @@ def main():
 
     if args.sample_rate is not None and not 0 < args.sample_rate <= 1:
         parser.error('--sample_rate 必须位于 (0, 1] 范围内')
+    test_ratio = 1.0 - args.train_ratio - args.validation_ratio
+    if args.split_strategy == 'ratio' and not (
+        0 < args.train_ratio < 1
+        and 0 < args.validation_ratio < 1
+        and test_ratio > 0
+    ):
+        parser.error('ratio 切分要求训练、验证、测试比例均大于0且总和为1')
+    if args.split_strategy == 'ratio' and args.mode != 'tune':
+        parser.error('--split_strategy ratio 只能与 --mode tune 一起使用')
     for name in ('batch_size', 'epochs', 'patience'):
         if getattr(args, name) <= 0:
             parser.error(f'--{name} 必须是正整数')
@@ -53,11 +103,27 @@ def main():
         seed=DATA_CONFIG['seed'],
     )
     train, val, test = processor.load_and_preprocess(
-        sample_rate=args.sample_rate
+        sample_rate=args.sample_rate,
+        mode=args.mode,
+        split_strategy=args.split_strategy,
+        train_ratio=args.train_ratio,
+        validation_ratio=args.validation_ratio,
     )
     if args.sample_rate is not None:
         print(f"采样比例: {args.sample_rate:.2%}")
-    print(f"训练集: {len(train):,}, 验证集: {len(val):,}, 测试集: {len(test):,}")
+    val_size = len(val) if val is not None else 0
+    print(f"训练模式: {args.mode}")
+    print(f"切分策略: {args.split_strategy}")
+    if args.split_strategy == 'ratio':
+        print(
+            "目标比例: "
+            f"train={args.train_ratio:.2%}, "
+            f"val={args.validation_ratio:.2%}, test={test_ratio:.2%}"
+        )
+    print(
+        f"训练集: {len(train):,}, 验证集: {val_size:,}, "
+        f"测试集: {len(test):,}"
+    )
     
     # 2. 构建模型
     print("2. 构建模型...")
@@ -86,9 +152,17 @@ def main():
     )
     x_train = processor.make_model_inputs(train)
     y_train = processor.make_labels(train)
-    x_val = processor.make_model_inputs(val)
-    y_val = processor.make_labels(val)
-    history = trainer.train(x_train, y_train, x_val, y_val)
+    if args.mode == 'tune':
+        x_val = processor.make_model_inputs(val)
+        y_val = processor.make_labels(val)
+        history = trainer.train(x_train, y_train, x_val, y_val)
+        best_epoch = trainer.find_best_epoch(history, monitor='val_auc')
+        print(f"验证集最佳 epoch: {best_epoch}")
+    else:
+        history = trainer.train_fixed_epochs(x_train, y_train)
+        best_epoch = args.epochs
+        print(f"固定训练 epoch: {best_epoch}")
+    epochs_ran = len(history.history.get('loss', []))
     
     # 4. 评估
     print("4. 评估模型...")
@@ -133,8 +207,84 @@ def main():
         args.output_dir, f"preprocessor_{args.split_date}.json"
     )
     processor.save_artifact(artifact_path)
+    metadata_path = os.path.join(
+        args.output_dir,
+        f"training_metadata_{args.mode}_{args.end_date}.json",
+    )
+    metadata = {
+        'mode': args.mode,
+        'split_strategy': args.split_strategy,
+        'dates': {
+            'start_date': args.start_date,
+            'split_date': args.split_date,
+            'end_date': args.end_date,
+            'train_interval': (
+                f"sorted first {args.train_ratio:.2%} of "
+                f"[{args.start_date}, {args.end_date}]"
+                if args.split_strategy == 'ratio'
+                else f"[{args.start_date}, {args.split_date})"
+                if args.mode == 'tune'
+                else f"[{args.start_date}, {args.split_date}]"
+            ),
+            'validation_date': (
+                None
+                if args.split_strategy == 'ratio'
+                else args.split_date if args.mode == 'tune' else None
+            ),
+            'test_interval': (
+                f"sorted last {test_ratio:.2%} of "
+                f"[{args.start_date}, {args.end_date}]"
+                if args.split_strategy == 'ratio'
+                else f"({args.split_date}, {args.end_date}]"
+            ),
+            'actual_train': _date_range(train),
+            'actual_validation': _date_range(val),
+            'actual_test': _date_range(test),
+        },
+        'training': {
+            'batch_size': args.batch_size,
+            'requested_epochs': args.epochs,
+            'epochs_ran': epochs_ran,
+            'best_epoch': best_epoch,
+            'best_epoch_source': (
+                'validation_val_auc'
+                if args.mode == 'tune'
+                else 'fixed_command_argument'
+            ),
+            'patience': args.patience if args.mode == 'tune' else None,
+            'sample_rate': args.sample_rate,
+            'train_ratio': (
+                args.train_ratio if args.split_strategy == 'ratio' else None
+            ),
+            'validation_ratio': (
+                args.validation_ratio
+                if args.split_strategy == 'ratio'
+                else None
+            ),
+            'test_ratio': test_ratio if args.split_strategy == 'ratio' else None,
+            'seed': DATA_CONFIG['seed'],
+        },
+        'dataset_sizes': {
+            'train': len(train),
+            'validation': val_size,
+            'test': len(test),
+        },
+        'test_metrics': {
+            name: _json_metric(value)
+            for name, value in metrics.items()
+        },
+        'files': {
+            'model': os.path.basename(model_path),
+            'preprocessor': os.path.basename(artifact_path),
+        },
+    }
+    temp_metadata_path = f"{metadata_path}.tmp"
+    with open(temp_metadata_path, 'w', encoding='utf-8') as file:
+        json.dump(metadata, file, ensure_ascii=False, indent=2, allow_nan=False)
+    os.replace(temp_metadata_path, metadata_path)
     print(f"模型已保存: {model_path}")
     print(f"预处理 artifact 已保存: {artifact_path}")
+    print(f"训练元数据已保存: {metadata_path}")
 
 
 if __name__ == '__main__':

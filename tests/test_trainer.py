@@ -21,6 +21,11 @@ class FakeModel:
         return []
 
 
+class FakeHistory:
+    def __init__(self, history):
+        self.history = history
+
+
 def test_train_only_forwards_prepared_inputs_to_model():
     model = FakeModel()
     trainer = ModelTrainer(model, batch_size=16, epochs=3, patience=2)
@@ -37,6 +42,33 @@ def test_train_only_forwards_prepared_inputs_to_model():
     assert kwargs['validation_data'][1] is y_val
     assert kwargs['batch_size'] == 16
     assert kwargs['epochs'] == 3
+
+
+def test_fixed_epoch_training_does_not_pass_validation_data():
+    model = FakeModel()
+    trainer = ModelTrainer(model, batch_size=16, epochs=3, patience=2)
+    x_train, y_train = {'category': np.array([[2]])}, np.array([1.0])
+
+    history = trainer.train_fixed_epochs(x_train, y_train)
+
+    assert history == 'history'
+    args, kwargs = model.fit_call
+    assert args[0] is x_train
+    assert args[1] is y_train
+    assert 'validation_data' not in kwargs
+    assert kwargs['epochs'] == 3
+    assert kwargs['callbacks'] == []
+
+
+def test_find_best_epoch_is_one_based():
+    history = FakeHistory({'val_auc': [0.6, 0.8, 0.7]})
+
+    assert ModelTrainer.find_best_epoch(history) == 2
+
+
+def test_find_best_epoch_requires_valid_monitor_values():
+    with pytest.raises(ValueError, match='没有有效指标'):
+        ModelTrainer.find_best_epoch(FakeHistory({'loss': [1.0]}))
 
 
 def test_evaluate_calculates_auc_and_weighted_gauc():

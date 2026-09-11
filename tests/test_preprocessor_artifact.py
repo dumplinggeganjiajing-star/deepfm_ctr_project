@@ -63,20 +63,24 @@ def test_missing_group_column_disables_gauc_instead_of_failing():
     assert _processor().make_groups(pd.DataFrame({'other': [1]})) is None
 
 
-def test_version0_keeps_userid_only_as_an_evaluation_group():
+def test_entity_ids_are_embedding_features_and_keep_raw_evaluation_ids():
     processor = _processor().fit(pd.DataFrame({
         'userid': ['user-a', 'user-b', None],
+        'article_id': ['article-a', 'article-b', None],
+        'theme_id': ['theme-a', 'theme-b', None],
     }))
 
     transformed = processor.transform(pd.DataFrame({
         'userid': ['user-a', 'unseen-user', None],
+        'article_id': ['article-a', 'unseen-article', None],
+        'theme_id': ['theme-a', 'unseen-theme', None],
     }))
 
-    assert 'userid' not in processor.cat_features
-    assert 'theme_id' not in processor.cat_features
-    assert 'article_id' not in processor.cat_features
-    assert 'userid' not in processor.vocabularies
-    assert transformed['userid'].tolist()[:2] == ['user-a', 'unseen-user']
+    assert {'userid', 'article_id', 'theme_id'} <= set(processor.cat_features)
+    assert {'userid', 'article_id', 'theme_id'} <= set(processor.vocabularies)
+    assert transformed['userid'].tolist() == [2, OOV_ID, MISSING_ID]
+    assert transformed['article_id'].tolist() == [2, OOV_ID, MISSING_ID]
+    assert transformed['theme_id'].tolist() == [2, OOV_ID, MISSING_ID]
     assert transformed[EVAL_GROUP_COL].tolist()[:2] == [
         'user-a', 'unseen-user'
     ]

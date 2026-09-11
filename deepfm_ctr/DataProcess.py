@@ -10,6 +10,7 @@ from typing import Optional, Tuple, Dict, Any, Mapping
 
 
 CATEGORICAL_FEATURES = [
+    "userid", "article_id", "theme_id",
     "is_logined", "article_type", "has_new_article", "sourceId",
     "gender", "day_of_week", "theme_type", "current_hour",
     "is_double_column", "is_in_click_seq", "is_in_play_seq",
@@ -46,6 +47,7 @@ NUMERIC_FEATURES = [
 LABEL = "ctr_label"
 GROUP_COL = "userid"
 EVAL_GROUP_COL = "__eval_userid"
+EVAL_ARTICLE_COL = "__eval_article_id"
 DATE_COL = "part_date"
 USER_ID_COL = "userid"
 ARTICLE_ID_COL = "article_id"
@@ -55,7 +57,7 @@ THEME_ID_COL = "theme_id"
 OOV_ID = 0
 MISSING_ID = 1
 FIRST_CATEGORY_ID = 2
-ARTIFACT_VERSION = 6
+ARTIFACT_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -130,7 +132,7 @@ FEATURE_SPECS: Mapping[str, FeatureSpec] = {
             name=name,
             kind=(
                 'entity_categorical'
-                if name == USER_ID_COL
+                if name in {USER_ID_COL, ARTICLE_ID_COL, THEME_ID_COL}
                 else 'position_categorical'
                 if name == 'indexno_bucket'
                 else 'categorical'
@@ -459,14 +461,17 @@ class DataProcessor:
             ('new_user', USER_ID_COL),
             ('new_article', ARTICLE_ID_COL),
         ):
+            auxiliary_column = (
+                EVAL_GROUP_COL if column == USER_ID_COL else EVAL_ARTICLE_COL
+            )
             train_column = (
-                EVAL_GROUP_COL
-                if column == USER_ID_COL and EVAL_GROUP_COL in train_df.columns
+                auxiliary_column
+                if auxiliary_column in train_df.columns
                 else column
             )
             eval_column = (
-                EVAL_GROUP_COL
-                if column == USER_ID_COL and EVAL_GROUP_COL in eval_df.columns
+                auxiliary_column
+                if auxiliary_column in eval_df.columns
                 else column
             )
             if (
@@ -565,21 +570,81 @@ class DataProcessor:
         
         return df
     
-    def split_data(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """时间切分数据"""
+    def split_data(
+        self,
+        df: pd.DataFrame,
+        mode: str = 'tune',
+        split_strategy: str = 'date',
+        train_ratio: float = 0.8,
+        validation_ratio: float = 0.1,
+    ) -> Tuple[pd.DataFrame, Optional[pd.DataFrame], pd.DataFrame]:
+        """按完整日期切分。
+
+        tune: [start, split) 训练，split 当日验证，(split, end] 测试。
+        final: [start, split] 完整训练，无验证集，(split, end] 测试。
+        """
+        if mode not in {'tune', 'final'}:
+            raise ValueError("mode 必须是 'tune' 或 'final'")
+        if split_strategy not in {'date', 'ratio'}:
+            raise ValueError("split_strategy 必须是 'date' 或 'ratio'")
+        if split_strategy == 'ratio' and mode != 'tune':
+            raise ValueError("ratio 切分只允许用于 tune 模式")
+        if DATE_COL not in df.columns:
+            raise ValueError(f"缺少日期列: {DATE_COL}")
+
         start = pd.Timestamp(self.start_date)
         split = pd.Timestamp(self.split_date)
         end = pd.Timestamp(self.end_date)
-        
-        train = df[(df[DATE_COL] >= start) & (df[DATE_COL] <= split)].copy()
+        if not start < split < end:
+            raise ValueError(
+                "日期必须满足 start_date < split_date < end_date"
+            )
+
+        if split_strategy == 'ratio':
+            test_ratio = 1.0 - train_ratio - validation_ratio
+            if not (
+                0 < train_ratio < 1
+                and 0 < validation_ratio < 1
+                and test_ratio > 0
+            ):
+                raise ValueError("train/validation/test 比例必须均大于0且总和为1")
+            window = df[
+                (df[DATE_COL] >= start) & (df[DATE_COL] <= end)
+            ].sort_values(DATE_COL, kind='stable').reset_index(drop=True)
+            if len(window) < 3:
+                raise ValueError("比例切分至少需要3条窗口内样本")
+            train_end = int(len(window) * train_ratio)
+            val_end = train_end + int(len(window) * validation_ratio)
+            train = window.iloc[:train_end].copy()
+            val = window.iloc[train_end:val_end].copy()
+            test = window.iloc[val_end:].copy()
+            if train.empty or val.empty or test.empty:
+                raise ValueError("比例切分后训练、验证或测试集为空")
+            return train, val, test
+
+        train_end_inclusive = mode == 'final'
+        train_end_mask = (
+            df[DATE_COL] <= split
+            if train_end_inclusive
+            else df[DATE_COL] < split
+        )
+        train = df[(df[DATE_COL] >= start) & train_end_mask].copy()
+        val = df[df[DATE_COL] == split].copy() if mode == 'tune' else None
         test = df[(df[DATE_COL] > split) & (df[DATE_COL] <= end)].copy()
-        
+
+        if train.empty:
+            raise ValueError("时间切分后的训练集为空")
+        if mode == 'tune' and val.empty:
+            raise ValueError(f"验证日 {self.split_date} 没有样本")
+        if test.empty:
+            raise ValueError(
+                f"测试区间 ({self.split_date}, {self.end_date}] 没有样本"
+            )
+
         train = train.sort_values(DATE_COL).reset_index(drop=True)
-        
-        n_val = max(1, int(len(train) * self.val_ratio))
-        val = train.iloc[-n_val:].copy()
-        train = train.iloc[:-n_val].copy()
-        
+        if val is not None:
+            val = val.sort_values(DATE_COL).reset_index(drop=True)
+        test = test.sort_values(DATE_COL).reset_index(drop=True)
         return train, val, test
     
     def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -740,6 +805,8 @@ class DataProcessor:
         # 不在模型特征列表中，也不会由 make_model_inputs() 传入模型。
         if GROUP_COL in df.columns:
             df[EVAL_GROUP_COL] = df[GROUP_COL].copy()
+        if ARTICLE_ID_COL in df.columns:
+            df[EVAL_ARTICLE_COL] = df[ARTICLE_ID_COL].copy()
         
         # ============================================================
         # Step 2: 类别特征编码
@@ -783,15 +850,29 @@ class DataProcessor:
         
         return df
     
-    def load_and_preprocess(self, sample_rate: Optional[float] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    def load_and_preprocess(
+        self,
+        sample_rate: Optional[float] = None,
+        mode: str = 'tune',
+        split_strategy: str = 'date',
+        train_ratio: float = 0.8,
+        validation_ratio: float = 0.1,
+    ) -> Tuple[pd.DataFrame, Optional[pd.DataFrame], pd.DataFrame]:
         """一站式加载和预处理"""
         df = self.load_data(sample_rate)
-        train, val, test = self.split_data(df)
+        train, val, test = self.split_data(
+            df,
+            mode=mode,
+            split_strategy=split_strategy,
+            train_ratio=train_ratio,
+            validation_ratio=validation_ratio,
+        )
         
         # 拟合并转换训练集
         self.fit(train)
         train = self.transform(train)
-        val = self.transform(val)
+        if val is not None:
+            val = self.transform(val)
         test = self.transform(test)
         
         return train, val, test

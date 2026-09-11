@@ -191,3 +191,131 @@ tests/                     回归测试
 ```
 
 最近针对 version0、分群和 Trainer 的相关测试为 `18 passed`，源码编译通过。新会话开始应先确认本地文件已同步到云端，再运行 `python -m pytest -q`。
+
+## 11. 2026-09-10 全量 tune 结果（明日 final 的依据）
+
+本轮已经按树模型 2026-09-10 任务的日期窗口重新运行，使用当前 version0 特征和 `tune` 模式：
+
+```text
+样本开始日期：2026-03-09
+训练日期：    2026-03-09 ～ 2026-09-07
+验证日期：    2026-09-08
+测试日期：    2026-09-09
+batch_size：  512
+最大 epochs： 25
+patience：    5
+训练 batches：16,370/epoch
+```
+
+树模型的训练窗口是 2026-03-09～2026-09-08，共8,413,419条；DeepFM tune 将其中9月8日单独作为验证集。因此应使用 `DeepFM train + val = 树模型 train` 判断样本是否对齐，不能只比较 Keras 显示的训练 batches。树模型9月9日测试集为33,812条。
+
+训练过程：
+
+```text
+epoch 1  train_auc=0.7255  val_auc=0.7174  val_loss=0.1924
+epoch 2  train_auc=0.7373  val_auc=0.7250  val_loss=0.1914
+epoch 3  train_auc=0.7401  val_auc=0.7226  val_loss=0.1914
+epoch 4  train_auc=0.7419  val_auc=0.7274  val_loss=0.1904
+epoch 5  train_auc=0.7429  val_auc=0.7266  val_loss=0.1901
+epoch 6  train_auc=0.7439  val_auc=0.7313  val_loss=0.1893  ← 最佳
+epoch 7  train_auc=0.7445  val_auc=0.7303
+epoch 8  train_auc=0.7451  val_auc=0.7284
+epoch 9  train_auc=0.7456  val_auc=0.7272
+epoch 10 train_auc=0.7461  val_auc=0.7257
+epoch 11 train_auc=0.7463  val_auc=0.7251，触发早停
+```
+
+最佳 epoch 为6。EarlyStopping 已恢复 epoch 6 的权重，随后得到测试结果：
+
+```text
+AUC                 0.7630
+GAUC                0.6441
+LogLoss             0.1820
+NDCG@10             0.5703
+预测CTR均值          0.055521
+真实CTR              0.053502
+新用户GAUC           0.6475（16,966条）
+老用户GAUC           0.6414（16,846条）
+新文章GAUC           0.5578（14,216条）
+Embedding参数量      972
+```
+
+CTR预测均值比真实值高约0.002019（约0.20个百分点），整体校准已经较接近。新老用户样本数之和为33,812，与树模型测试集数量一致。本轮结果用于选定 epoch 和记录 DeepFM 阶段表现；正式横向结论应以明日 `final` 模式为准。
+
+产物：
+
+```text
+/data/ganjiajing/deepfm_ctr_project/artifacts_compare_tune_20260909/deepfm_20260908.keras
+/data/ganjiajing/deepfm_ctr_project/artifacts_compare_tune_20260909/preprocessor_20260908.json
+/data/ganjiajing/deepfm_ctr_project/artifacts_compare_tune_20260909/training_metadata_tune_20260909.json
+```
+
+明日 final 模式必须重新初始化模型，把9月8日重新加入训练集，固定训练6轮，不使用验证集或 EarlyStopping：
+
+```bash
+CUDA_VISIBLE_DEVICES=-1 \
+TF_CPP_MIN_LOG_LEVEL=2 \
+python scripts/train.py \
+  --mode final \
+  --data_dir /data/ganjiajing/deepfm_ctr_project/data \
+  --start_date 20260309 \
+  --split_date 20260908 \
+  --end_date 20260909 \
+  --batch_size 512 \
+  --epochs 6 \
+  --patience 5 \
+  --output_dir /data/ganjiajing/deepfm_ctr_project/artifacts_compare_final_20260909
+```
+
+final 启动后应先核对：
+
+```text
+训练模式：final
+训练集：8,413,419
+验证集：0
+测试集：33,812
+每轮训练 batches：约16,433
+```
+
+若数量不一致，应停止任务并先检查命令行日期、数据快照和过滤规则。正式比较时使用 final 测试结果与树模型同日结果。
+
+2026-09-10运行的同日树模型正式基准已更新为：
+
+```text
+测试集AUC   0.762981
+测试集GAUC  0.645793
+```
+
+此前记录的树模型 `AUC=0.738449、GAUC=0.631001` 来自较早日期任务，不能用于本次9月9日测试集的直接比较。本轮 DeepFM tune 恢复最佳 epoch 6 后为 `AUC=0.7630、GAUC=0.6441`：AUC与树模型非常接近，GAUC暂低约0.0017。但 tune 模型少使用9月8日数据进行参数训练，因此该差值只作过程观察，最终结论必须使用明日 full-train final 模型，并确认双方GAUC分组、有效组过滤和加权方式一致。
+
+## 12. 2026-09-11 final结果与树模型对比
+
+final 已使用 2026-03-09～2026-09-08 的完整8,413,419条训练样本固定训练6轮，并在2026-09-09的33,812条测试样本上评估。每轮16,433个batch，样本规模与树模型对齐。
+
+| 指标 | 树模型 | DeepFM final | DeepFM差值 |
+| --- | ---: | ---: | ---: |
+| AUC | 0.762981 | 0.7659 | 约+0.0029 |
+| GAUC | 0.645793 | 0.6475 | 约+0.0017 |
+
+DeepFM其他结果：
+
+```text
+LogLoss             0.1813
+NDCG@10             0.5699
+预测CTR均值          0.057410
+真实CTR              0.053502
+新用户GAUC           0.6556（15,895条）
+老用户GAUC           0.6417（17,917条）
+新文章GAUC           0.5336（11,880条）
+Embedding参数量      972
+```
+
+结论为 DeepFM 在本次离线 AUC和GAUC上小幅领先，但差值较小，尚未进行置信区间或多随机种子验证。新文章GAUC只有0.5336，是当前最明显的薄弱点。完整报告见 `MODEL_COMPARISON_REPORT_20260909.md`。
+
+final产物：
+
+```text
+/data/ganjiajing/deepfm_ctr_project/artifacts_compare_final_20260909/deepfm_20260908.keras
+/data/ganjiajing/deepfm_ctr_project/artifacts_compare_final_20260909/preprocessor_20260908.json
+/data/ganjiajing/deepfm_ctr_project/artifacts_compare_final_20260909/training_metadata_final_20260909.json
+```

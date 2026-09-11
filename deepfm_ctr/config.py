@@ -5,10 +5,16 @@ import os
 DATA_CONFIG = {
     # 云端优先通过环境变量或 train.py --data_dir 指定数据目录。
     'data_dir': os.getenv('DEEPFM_DATA_DIR', './data'),
-    # 拼接文件路径
-    'start_date': '20260420',
-    'split_date': '20260520',
-    'end_date': '20260620',
+    # 与 2026-09-01 树模型离线日志对齐的可复现时间窗口。
+    # tune: [start, split) 训练、split 当日验证；
+    # final: [start, split] 训练；两种模式均在 (split, end] 测试。
+    'start_date': '20260228',
+    'split_date': '20260830',
+    'end_date': '20260831',
+    'split_strategy': 'date',
+    'train_ratio': 0.8,
+    'validation_ratio': 0.1,
+    # 为兼容既有 artifact 暂时保留；明确日期切分不再使用该比例。
     'val_ratio': 0.1,
     'seed': 42,
 }

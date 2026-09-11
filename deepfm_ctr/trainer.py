@@ -47,6 +47,27 @@ class ModelTrainer:
             verbose=1,
         )
 
+    def train_fixed_epochs(self, x_train, y_train, callbacks=None):
+        """无验证集训练固定轮数，供最终全训练窗口重训使用。"""
+        return self.model.fit(
+            x_train,
+            y_train,
+            batch_size=self.batch_size,
+            epochs=self.epochs,
+            callbacks=[] if callbacks is None else list(callbacks),
+            verbose=1,
+            shuffle=True,
+        )
+
+    @staticmethod
+    def find_best_epoch(history, monitor='val_auc', mode='max') -> int:
+        """返回监控指标最佳轮次（从1开始）。"""
+        values = np.asarray(history.history.get(monitor, []), dtype=float)
+        if values.size == 0 or np.isnan(values).all():
+            raise ValueError(f"训练历史中没有有效指标: {monitor}")
+        index = np.nanargmax(values) if mode == 'max' else np.nanargmin(values)
+        return int(index) + 1
+
     def evaluate(
         self,
         x_test,
