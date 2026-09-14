@@ -9,6 +9,9 @@ DATA_CONFIG = {
     'start_date': '20260420',
     'split_date': '20260520',
     'end_date': '20260620',
+    'split_strategy': 'date',
+    'train_ratio': 0.8,
+    'validation_ratio': 0.1,
     'val_ratio': 0.1,
     'seed': 42,
 }

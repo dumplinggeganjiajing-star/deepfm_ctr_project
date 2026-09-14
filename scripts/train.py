@@ -18,6 +18,20 @@ def main():
     parser.add_argument('--start_date', default=DATA_CONFIG['start_date'])
     parser.add_argument('--split_date', default=DATA_CONFIG['split_date'])
     parser.add_argument('--end_date', default=DATA_CONFIG['end_date'])
+    parser.add_argument(
+        '--split_strategy',
+        choices=('date', 'ratio'),
+        default=DATA_CONFIG['split_strategy'],
+        help='date=原日期边界；ratio=窗口内按时间排序后按样本比例切分',
+    )
+    parser.add_argument(
+        '--train_ratio', type=float, default=DATA_CONFIG['train_ratio']
+    )
+    parser.add_argument(
+        '--validation_ratio',
+        type=float,
+        default=DATA_CONFIG['validation_ratio'],
+    )
     parser.add_argument('--batch_size', type=int, default=TRAINING_CONFIG['batch_size'])
     parser.add_argument('--epochs', type=int, default=TRAINING_CONFIG['epochs'])
     parser.add_argument(
@@ -36,6 +50,13 @@ def main():
 
     if args.sample_rate is not None and not 0 < args.sample_rate <= 1:
         parser.error('--sample_rate 必须位于 (0, 1] 范围内')
+    test_ratio = 1.0 - args.train_ratio - args.validation_ratio
+    if args.split_strategy == 'ratio' and not (
+        0 < args.train_ratio < 1
+        and 0 < args.validation_ratio < 1
+        and test_ratio > 0
+    ):
+        parser.error('ratio切分要求训练、验证、测试比例均大于0且总和为1')
     for name in ('batch_size', 'epochs', 'patience'):
         if getattr(args, name) <= 0:
             parser.error(f'--{name} 必须是正整数')
@@ -53,10 +74,20 @@ def main():
         seed=DATA_CONFIG['seed'],
     )
     train, val, test = processor.load_and_preprocess(
-        sample_rate=args.sample_rate
+        sample_rate=args.sample_rate,
+        split_strategy=args.split_strategy,
+        train_ratio=args.train_ratio,
+        validation_ratio=args.validation_ratio,
     )
     if args.sample_rate is not None:
         print(f"采样比例: {args.sample_rate:.2%}")
+    print(f"切分策略: {args.split_strategy}")
+    if args.split_strategy == 'ratio':
+        print(
+            "目标比例: "
+            f"train={args.train_ratio:.2%}, "
+            f"val={args.validation_ratio:.2%}, test={test_ratio:.2%}"
+        )
     print(f"训练集: {len(train):,}, 验证集: {len(val):,}, 测试集: {len(test):,}")
     
     # 2. 构建模型

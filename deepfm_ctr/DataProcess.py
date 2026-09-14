@@ -565,11 +565,51 @@ class DataProcessor:
         
         return df
     
-    def split_data(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """时间切分数据"""
+    def split_data(
+        self,
+        df: pd.DataFrame,
+        split_strategy: str = 'date',
+        train_ratio: float = 0.8,
+        validation_ratio: float = 0.1,
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """按日期边界或按时间排序后的样本比例切分数据。"""
+        if split_strategy not in {'date', 'ratio'}:
+            raise ValueError("split_strategy 必须是 'date' 或 'ratio'")
+        if DATE_COL not in df.columns:
+            raise ValueError(f"缺少日期列: {DATE_COL}")
+
         start = pd.Timestamp(self.start_date)
         split = pd.Timestamp(self.split_date)
         end = pd.Timestamp(self.end_date)
+
+        if split_strategy == 'ratio':
+            test_ratio = 1.0 - train_ratio - validation_ratio
+            if not (
+                0 < train_ratio < 1
+                and 0 < validation_ratio < 1
+                and test_ratio > 0
+            ):
+                raise ValueError("训练、验证、测试比例必须均大于0且总和为1")
+            if start > end:
+                raise ValueError("start_date 不能晚于 end_date")
+
+            window = df[
+                (df[DATE_COL] >= start) & (df[DATE_COL] <= end)
+            ].sort_values(DATE_COL, kind='stable').reset_index(drop=True)
+            if len(window) < 3:
+                raise ValueError("比例切分至少需要3条窗口内样本")
+
+            train_end = int(len(window) * train_ratio)
+            validation_end = train_end + int(len(window) * validation_ratio)
+            train = window.iloc[:train_end].copy()
+            val = window.iloc[train_end:validation_end].copy()
+            test = window.iloc[validation_end:].copy()
+            if train.empty or val.empty or test.empty:
+                raise ValueError("比例切分后训练、验证或测试集为空")
+            return train, val, test
+
+        if not start < split < end:
+            raise ValueError("日期必须满足 start_date < split_date < end_date")
         
         train = df[(df[DATE_COL] >= start) & (df[DATE_COL] <= split)].copy()
         test = df[(df[DATE_COL] > split) & (df[DATE_COL] <= end)].copy()
@@ -783,10 +823,21 @@ class DataProcessor:
         
         return df
     
-    def load_and_preprocess(self, sample_rate: Optional[float] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    def load_and_preprocess(
+        self,
+        sample_rate: Optional[float] = None,
+        split_strategy: str = 'date',
+        train_ratio: float = 0.8,
+        validation_ratio: float = 0.1,
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         """一站式加载和预处理"""
         df = self.load_data(sample_rate)
-        train, val, test = self.split_data(df)
+        train, val, test = self.split_data(
+            df,
+            split_strategy=split_strategy,
+            train_ratio=train_ratio,
+            validation_ratio=validation_ratio,
+        )
         
         # 拟合并转换训练集
         self.fit(train)
