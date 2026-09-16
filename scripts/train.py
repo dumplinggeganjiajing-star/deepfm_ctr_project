@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from deepfm_ctr.config import DATA_CONFIG, MODEL_CONFIG, TRAINING_CONFIG
-from deepfm_ctr.DataProcess import DataProcessor, GROUP_COL
+from deepfm_ctr.DataProcess import DataProcessor, DATE_COL, GROUP_COL
 from deepfm_ctr.model import DeepFMBuilder
 from deepfm_ctr.trainer import ModelTrainer
 
@@ -89,6 +89,21 @@ def main():
             f"val={args.validation_ratio:.2%}, test={test_ratio:.2%}"
         )
     print(f"训练集: {len(train):,}, 验证集: {len(val):,}, 测试集: {len(test):,}")
+    total_samples = len(train) + len(val) + len(test)
+    print(
+        "实际比例: "
+        f"train={len(train) / total_samples:.2%}, "
+        f"val={len(val) / total_samples:.2%}, "
+        f"test={len(test) / total_samples:.2%}"
+    )
+    for split_name, split_df in (
+        ('train', train), ('val', val), ('test', test)
+    ):
+        print(
+            f"{split_name} 日期范围: "
+            f"{split_df[DATE_COL].min():%Y-%m-%d} ~ "
+            f"{split_df[DATE_COL].max():%Y-%m-%d}"
+        )
     
     # 2. 构建模型
     print("2. 构建模型...")

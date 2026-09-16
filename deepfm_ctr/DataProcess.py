@@ -572,7 +572,7 @@ class DataProcessor:
         train_ratio: float = 0.8,
         validation_ratio: float = 0.1,
     ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        """按日期边界或按时间排序后的样本比例切分数据。"""
+        """按日期边界切分，或按目标样本比例选择完整自然日边界。"""
         if split_strategy not in {'date', 'ratio'}:
             raise ValueError("split_strategy 必须是 'date' 或 'ratio'")
         if DATE_COL not in df.columns:
@@ -596,14 +596,43 @@ class DataProcessor:
             window = df[
                 (df[DATE_COL] >= start) & (df[DATE_COL] <= end)
             ].sort_values(DATE_COL, kind='stable').reset_index(drop=True)
-            if len(window) < 3:
-                raise ValueError("比例切分至少需要3条窗口内样本")
+            day = window[DATE_COL].dt.normalize()
+            daily_counts = day.value_counts(sort=False).sort_index()
+            if len(daily_counts) < 3:
+                raise ValueError("完整日期比例切分至少需要3个不同日期")
 
-            train_end = int(len(window) * train_ratio)
-            validation_end = train_end + int(len(window) * validation_ratio)
-            train = window.iloc[:train_end].copy()
-            val = window.iloc[train_end:validation_end].copy()
-            test = window.iloc[validation_end:].copy()
+            # 只能在自然日之间选择边界。遍历两个边界，令训练集累计比例
+            # 最接近 train_ratio，训练+验证累计比例最接近二者之和。
+            # 日期数通常远小于样本数，因此该搜索不会成为性能瓶颈。
+            cumulative = daily_counts.cumsum().to_numpy()
+            total = len(window)
+            validation_end_ratio = train_ratio + validation_ratio
+            best = None
+            for train_days in range(1, len(daily_counts) - 1):
+                train_actual = cumulative[train_days - 1] / total
+                for validation_end_days in range(
+                    train_days + 1, len(daily_counts)
+                ):
+                    validation_end_actual = (
+                        cumulative[validation_end_days - 1] / total
+                    )
+                    error = (
+                        abs(train_actual - train_ratio)
+                        + abs(validation_end_actual - validation_end_ratio)
+                    )
+                    candidate = (error, train_days, validation_end_days)
+                    if best is None or candidate < best:
+                        best = candidate
+
+            _, train_days, validation_end_days = best
+            train_last_day = daily_counts.index[train_days - 1]
+            validation_last_day = daily_counts.index[validation_end_days - 1]
+
+            train = window.loc[day <= train_last_day].copy()
+            val = window.loc[
+                (day > train_last_day) & (day <= validation_last_day)
+            ].copy()
+            test = window.loc[day > validation_last_day].copy()
             if train.empty or val.empty or test.empty:
                 raise ValueError("比例切分后训练、验证或测试集为空")
             return train, val, test
