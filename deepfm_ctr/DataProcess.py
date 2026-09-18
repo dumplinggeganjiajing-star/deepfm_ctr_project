@@ -14,7 +14,6 @@ CATEGORICAL_FEATURES = [
     "gender", "day_of_week", "theme_type", "current_hour",
     "is_double_column", "is_in_click_seq", "is_in_play_seq",
     "is_in_follow_seq", "indexno_bucket", "days_since_last_click_bucket",
-    "days_since_last_click_article_type_cross",
 ]
 
 NUMERIC_FEATURES = [
@@ -56,7 +55,7 @@ THEME_ID_COL = "theme_id"
 OOV_ID = 0
 MISSING_ID = 1
 FIRST_CATEGORY_ID = 2
-ARTIFACT_VERSION = 7
+ARTIFACT_VERSION = 8
 
 
 @dataclass(frozen=True)
@@ -101,7 +100,6 @@ _CATEGORICAL_VALID_RANGES = {
     'theme_type': (0, 10), 'sourceId': (0, 100),
     'indexno_bucket': (0, 25),
     'days_since_last_click_bucket': (0, 6),
-    'days_since_last_click_article_type_cross': (0, 95),
 }
 
 
@@ -128,12 +126,6 @@ DERIVED_FEATURE_SPECS: Mapping[str, DerivedFeatureSpec] = {
         name='days_since_last_click_bucket',
         source='days_since_last_click',
         rule='last_click_recency_bucket',
-        default=None,
-    ),
-    'days_since_last_click_article_type_cross': DerivedFeatureSpec(
-        name='days_since_last_click_article_type_cross',
-        source='days_since_last_click_bucket',
-        rule='last_click_recency_article_type_cross',
         default=None,
     ),
 }
@@ -566,28 +558,6 @@ class DataProcessor:
                 bucket.loc[valid & (numeric >= 15) & (numeric < 31)] = 5
                 bucket.loc[valid & (numeric >= 31)] = 6
                 df[spec.name] = bucket
-            elif spec.rule == 'last_click_recency_article_type_cross':
-                # 固定进制组合两个低基数类别。7 表示活跃度缺失，
-                # 11 表示 article_type 缺失/非法，因此缺失状态仍能
-                # 与另一维的真实类别形成独立组合。
-                recency = pd.to_numeric(df[spec.source], errors='coerce')
-                article_source = df.get(
-                    'article_type',
-                    pd.Series(np.nan, index=df.index, dtype=np.float64),
-                )
-                article_type = pd.to_numeric(article_source, errors='coerce')
-                recency_valid = recency.between(0, 6) & np.isclose(
-                    recency, recency.round(), rtol=0.0, atol=1e-8
-                )
-                article_valid = article_type.between(0, 10) & np.isclose(
-                    article_type, article_type.round(), rtol=0.0, atol=1e-8
-                )
-                recency_code = recency.round().where(recency_valid, 7)
-                article_code = article_type.round().where(article_valid, 11)
-                df[spec.name] = (
-                    recency_code.astype(np.int32) * 12
-                    + article_code.astype(np.int32)
-                )
             else:
                 raise ValueError(
                     f"未知派生规则: feature={spec.name}, rule={spec.rule}"

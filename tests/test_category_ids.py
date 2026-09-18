@@ -130,21 +130,7 @@ def test_last_click_recency_bucket_boundaries_and_missing_state():
     assert derived['days_since_last_click_bucket'].iloc[14:].isna().all()
 
 
-def test_last_click_article_type_cross_preserves_missing_combinations():
-    processor = _processor()
-    derived = processor._derive_features(pd.DataFrame({
-        'days_since_last_click': [0, 2, None, None, 31],
-        'article_type': [3, 3, 3, None, 10],
-    }))
-
-    # cross = recency_code * 12 + article_type_code;
-    # recency missing=7 and article_type missing=11.
-    assert derived['days_since_last_click_article_type_cross'].tolist() == [
-        3, 27, 87, 95, 82,
-    ]
-
-
-def test_new_recency_features_are_fitted_and_encoded_as_categories():
+def test_new_recency_feature_is_fitted_and_encoded_as_category():
     processor = _processor().fit(pd.DataFrame({
         'days_since_last_click': [0, 2, None],
         'article_type': [1, 2, 1],
@@ -155,10 +141,7 @@ def test_new_recency_features_are_fitted_and_encoded_as_categories():
     }))
 
     assert 'days_since_last_click_bucket' in processor.vocabularies
-    assert 'days_since_last_click_article_type_cross' in processor.vocabularies
     assert transformed['days_since_last_click_bucket'].tolist() == [
         FIRST_CATEGORY_ID, OOV_ID, MISSING_ID,
     ]
-    assert transformed['days_since_last_click_article_type_cross'].tolist() == [
-        FIRST_CATEGORY_ID, OOV_ID, FIRST_CATEGORY_ID + 2,
-    ]
+    assert 'days_since_last_click_article_type_cross' not in processor.cat_features
