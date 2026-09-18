@@ -13,7 +13,7 @@ CATEGORICAL_FEATURES = [
     "is_logined", "article_type", "has_new_article", "sourceId",
     "gender", "day_of_week", "theme_type", "current_hour",
     "is_double_column", "is_in_click_seq", "is_in_play_seq",
-    "is_in_follow_seq", "indexno_bucket",
+    "is_in_follow_seq", "user_content_history_state", "indexno_bucket",
 ]
 
 NUMERIC_FEATURES = [
@@ -55,7 +55,7 @@ THEME_ID_COL = "theme_id"
 OOV_ID = 0
 MISSING_ID = 1
 FIRST_CATEGORY_ID = 2
-ARTIFACT_VERSION = 6
+ARTIFACT_VERSION = 7
 
 
 @dataclass(frozen=True)
@@ -96,6 +96,7 @@ _CATEGORICAL_VALID_RANGES = {
     'has_new_article': (0, 1), 'is_double_column': (0, 1),
     'is_in_click_seq': (0, 1), 'is_in_play_seq': (0, 1),
     'is_in_follow_seq': (0, 1), 'current_hour': (0, 23),
+    'user_content_history_state': (0, 7),
     'day_of_week': (0, 6), 'article_type': (0, 10),
     'theme_type': (0, 10), 'sourceId': (0, 100),
     'indexno_bucket': (0, 25),
@@ -114,6 +115,12 @@ DERIVED_FEATURE_SPECS: Mapping[str, DerivedFeatureSpec] = {
         source='newArticle',
         rule='numeric_presence_to_binary',
         default=0,
+    ),
+    'user_content_history_state': DerivedFeatureSpec(
+        name='user_content_history_state',
+        source='is_in_click_seq',
+        rule='content_history_bitmask',
+        default=None,
     ),
     'indexno_bucket': DerivedFeatureSpec(
         name='indexno_bucket',
@@ -517,6 +524,33 @@ class DataProcessor:
                     {-2147483648, -999999999, 999999999}
                 )
                 df[spec.name] = valid.astype(np.int32)
+            elif spec.rule == 'content_history_bitmask':
+                source_names = (
+                    'is_in_click_seq',
+                    'is_in_play_seq',
+                    'is_in_follow_seq',
+                )
+                source_values = {
+                    name: pd.to_numeric(
+                        df.get(
+                            name,
+                            pd.Series(np.nan, index=df.index, dtype=np.float64),
+                        ),
+                        errors='coerce',
+                    )
+                    for name in source_names
+                }
+                valid = pd.Series(True, index=df.index)
+                for values in source_values.values():
+                    valid &= values.isin((0, 1))
+
+                state = pd.Series(np.nan, index=df.index, dtype=np.float64)
+                state.loc[valid] = (
+                    source_values['is_in_click_seq'].loc[valid]
+                    + 2 * source_values['is_in_play_seq'].loc[valid]
+                    + 4 * source_values['is_in_follow_seq'].loc[valid]
+                )
+                df[spec.name] = state
             elif spec.rule == 'position_bucket':
                 numeric = pd.to_numeric(df[spec.source], errors='coerce')
                 rounded = numeric.round()

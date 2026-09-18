@@ -112,3 +112,44 @@ def test_hot_article_is_numeric_not_categorical():
 
     assert 'hotArticle' in processor.num_features
     assert 'hotArticle' not in processor.cat_features
+
+
+def test_user_content_history_state_encodes_all_binary_combinations():
+    processor = _processor()
+    derived = processor._derive_features(pd.DataFrame({
+        'is_in_click_seq':  [0, 1, 0, 1, 0, 1, 0, 1],
+        'is_in_play_seq':   [0, 0, 1, 1, 0, 0, 1, 1],
+        'is_in_follow_seq': [0, 0, 0, 0, 1, 1, 1, 1],
+    }))
+
+    assert derived['user_content_history_state'].tolist() == list(range(8))
+
+
+def test_user_content_history_state_preserves_invalid_or_missing_as_missing():
+    processor = _processor()
+    derived = processor._derive_features(pd.DataFrame({
+        'is_in_click_seq': [1, None, 1, 2],
+        'is_in_play_seq': [1, 1, None, 0],
+        'is_in_follow_seq': [0, 0, 0, 0],
+    }))
+
+    assert derived['user_content_history_state'].iloc[0] == 3
+    assert derived['user_content_history_state'].iloc[1:].isna().all()
+
+
+def test_user_content_history_state_is_fitted_as_one_categorical_feature():
+    processor = _processor().fit(pd.DataFrame({
+        'is_in_click_seq': [0, 1, 1],
+        'is_in_play_seq': [0, 0, 1],
+        'is_in_follow_seq': [0, 0, 0],
+    }))
+    transformed = processor.transform(pd.DataFrame({
+        'is_in_click_seq': [0, 0, None],
+        'is_in_play_seq': [0, 1, 0],
+        'is_in_follow_seq': [0, 0, 0],
+    }))
+
+    assert processor.vocab_sizes['user_content_history_state'] == 5
+    assert transformed['user_content_history_state'].tolist() == [
+        FIRST_CATEGORY_ID, OOV_ID, MISSING_ID,
+    ]
