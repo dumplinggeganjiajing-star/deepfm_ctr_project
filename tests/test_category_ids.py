@@ -112,3 +112,53 @@ def test_hot_article_is_numeric_not_categorical():
 
     assert 'hotArticle' in processor.num_features
     assert 'hotArticle' not in processor.cat_features
+
+
+def test_last_click_recency_bucket_boundaries_and_missing_state():
+    processor = _processor()
+    derived = processor._derive_features(pd.DataFrame({
+        'days_since_last_click': [
+            0, 0.5, 1, 1.9, 2, 3.9, 4, 7.9,
+            8, 14.9, 15, 30.9, 31, 365, None, -1, 'bad', -999999999,
+        ],
+        'article_type': [1] * 18,
+    }))
+
+    assert derived['days_since_last_click_bucket'].tolist()[:14] == [
+        0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
+    ]
+    assert derived['days_since_last_click_bucket'].iloc[14:].isna().all()
+
+
+def test_last_click_article_type_cross_preserves_missing_combinations():
+    processor = _processor()
+    derived = processor._derive_features(pd.DataFrame({
+        'days_since_last_click': [0, 2, None, None, 31],
+        'article_type': [3, 3, 3, None, 10],
+    }))
+
+    # cross = recency_code * 12 + article_type_code;
+    # recency missing=7 and article_type missing=11.
+    assert derived['days_since_last_click_article_type_cross'].tolist() == [
+        3, 27, 87, 95, 82,
+    ]
+
+
+def test_new_recency_features_are_fitted_and_encoded_as_categories():
+    processor = _processor().fit(pd.DataFrame({
+        'days_since_last_click': [0, 2, None],
+        'article_type': [1, 2, 1],
+    }))
+    transformed = processor.transform(pd.DataFrame({
+        'days_since_last_click': [0, 8, None],
+        'article_type': [1, 2, 1],
+    }))
+
+    assert 'days_since_last_click_bucket' in processor.vocabularies
+    assert 'days_since_last_click_article_type_cross' in processor.vocabularies
+    assert transformed['days_since_last_click_bucket'].tolist() == [
+        FIRST_CATEGORY_ID, OOV_ID, MISSING_ID,
+    ]
+    assert transformed['days_since_last_click_article_type_cross'].tolist() == [
+        FIRST_CATEGORY_ID, OOV_ID, FIRST_CATEGORY_ID + 2,
+    ]
